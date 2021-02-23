@@ -1,73 +1,77 @@
 from PIL import Image
+from pathlib import Path
+from typing import List
 import argparse
-import pathlib
 import yaml
 
-def get_layer(layer: str, cfg: dict, args) -> Image:
-    image_names = list(args.input.joinpath(layer).glob('*.png'))
-    coordinates = [list(map(int, x.stem.split('_'))) for x in image_names]
-    image_map = list(zip(image_names, coordinates))
-    total_layers = max([x[0] for x in coordinates]) + 1
-    
-    layers = []
-    for i in range(total_layers):
-        if i in cfg:
-            if cfg[i].get("hidden", False) is True:
-                continue
-        
-        i_coordinates = [x for x in coordinates if x[0] == i]
-        if len(i_coordinates) == 0:
+def get_coords(path: Path) -> List[int]:
+    """
+    From a file of name layer_y_x.png, gets a list [layer, y, x]. 
+    """
+    return [int(x) for x in path.stem.split("_")]
+
+def get_layer(layer_path: str, cfg: dict, args) -> Image:
+    # Get all images
+    tile_paths = list(args.input.joinpath(layer_path).glob('*.png'))
+    # Count the layers by looking through all the files for the biggest x in the pattern x_*_*.png
+    sublayer_count = max([get_coords(x)[0] for x in tile_paths]) + 1
+    # initialize a blank sublayer list
+    sublayers = [None]*sublayer_count
+
+    # Filter out all images for hidden layers
+    tile_paths = [x for x in tile_paths if not cfg.get(get_coords(x)[0], {}).get("hidden", False)]
+
+    for i in range(sublayer_count):
+        # Only get images for this layer
+        sublayer_images = [x for x in tile_paths if get_coords(x)[0] == i]
+        if len(sublayer_images) == 0: # This is a hidden layer; leave it none
             continue
+        # Calculate width
+        sublayer_width = (max([get_coords(x)[2] for x in sublayer_images]) + 1) * 128
+        sublayer_height = (max([get_coords(x)[1] for x in sublayer_images]) + 1) * 128
+        # Initialize image
+        sublayers[i] = Image.new('RGBA', (sublayer_width, sublayer_height))
 
-        total_width = (max([x[2] for x in i_coordinates]) * 128) + 128
-        total_height = (max([x[1] for x in i_coordinates]) * 128) + 128
-    
-        layer_im = Image.new('RGBA', (total_width, total_height))
-    
-        for im in image_map:
-            if im[1][0] != i:
-                continue
-            
-            image = Image.open(im[0])
-            layer_im.paste(image, (im[1][2] * 128, im[1][1] * 128), image)
-            image.close()
-        
-        if i in cfg:
-            if cfg[i].get("mirror", False):
-                # Mirror
-                mirror_image = Image.new("RGBA", ((total_width * 2) - 128 * cfg[i].get("mirror_hoffset", 0), total_height))
-                flip = layer_im.transpose(Image.FLIP_LEFT_RIGHT)
+    for tile_path in tile_paths:
+        tile_coords = get_coords(tile_path)
+        tile = Image.open(tile_path)
+        sublayers[tile_coords[0]].paste(tile, (tile_coords[2] * 128, tile_coords[1] * 128), tile)
 
-                mirror_image.paste(layer_im, (0,0), layer_im)
-                mirror_image.paste(flip, (total_width - 128 * cfg[i].get("mirror_hoffset", 0), 0), flip)
+    if len([x for x in sublayers if x is not None]) == 0: # If there are no visible layers...
+        return None # ...return nothing.
 
-                layers.append(mirror_image)
-            else:
-                layers.append(layer_im)
-        else:
-            layers.append(layer_im)
+    for sublayer_id, sublayer in enumerate(sublayers):
+        if cfg.get(sublayer_id, {}).get("mirror", False):
+            # Mirror
+            mirror_width = (sublayer.size[0] * 2) - 128 * cfg.get(sublayer_id, {}).get("mirror_hoffset", 0)
+            flip_pos = sublayer.size[0] - 128 * cfg.get(sublayer_id, {}).get("mirror_hoffset", 0)
+            mirror_image = Image.new('RGBA', (mirror_width, sublayer.size[1]))
+            flip = sublayer.transpose(Image.FLIP_LEFT_RIGHT)
 
+            mirror_image.paste(sublayer, (0,0), sublayer)
+            mirror_image.paste(flip, (flip_pos, 0), flip)
+            sublayers[sublayer_id] = mirror_image
+
+    layer_width = max([x.size[0] for x in sublayers if x is not None])
+    layer_height = max([x.size[1] for x in sublayers if x is not None])
+
+    layer = Image.new('RGBA', (layer_width, layer_height))
+    for sublayer_id, sublayer in enumerate(sublayers):
+        if sublayer is None:
+            continue
         if args.all:
-            pathlib.Path("debug/").joinpath(pathlib.Path(args.input.stem)).mkdir(parents=True, exist_ok=True)
-            layer_im.save(pathlib.Path("debug/").joinpath(pathlib.Path(args.input.stem)).joinpath(f"{args.input.stem}_{layer}_{i}.png"))
-    
-    layer_width = max([x.size[0] for x in layers])
-    layer_height = max([x.size[1] for x in layers])
-    full_layer = Image.new('RGBA', (layer_width, layer_height))
-    for sub_layer in layers:
-        full_layer.paste(sub_layer, (0,0), sub_layer)
+            Path(f"debug/{args.input.stem}/").mkdir(parents=True, exist_ok=True)
+            sublayer.save(Path(f"debug/{args.input.stem}/{args.input.stem}_{layer_path}{sublayer_id}.png"))
+        layer.paste(sublayer, (0,0), sublayer)
 
-    if args.all:
-        pathlib.Path("debug/").joinpath(pathlib.Path(args.input.stem)).mkdir(parents=True, exist_ok=True)
-        full_layer.save(pathlib.Path("debug/").joinpath(pathlib.Path(args.input.stem)).joinpath(f"{args.input.stem}_{layer}.png"))
-    return full_layer    
+    return layer
 
 if __name__ == "__main__":
     cli_parser = argparse.ArgumentParser(description="Stitch together Formicide maps")
 
-    cli_parser.add_argument("-i", "--input", type=pathlib.Path, help="path to the map", required=True)
-    cli_parser.add_argument("-c", "--config", type=pathlib.Path, help="path to the config file", default=None)
-    cli_parser.add_argument("-o", "--output", type=pathlib.Path, help="output file", default=None)
+    cli_parser.add_argument("-i", "--input", type=Path, help="path to the map", required=True)
+    cli_parser.add_argument("-c", "--config", type=Path, help="path to the config file", default=None)
+    cli_parser.add_argument("-o", "--output", type=Path, help="output file", default=None)
     cli_parser.add_argument("-a", "--all", help="output all layers individually", action="store_true")
 
     args = cli_parser.parse_args()
@@ -77,11 +81,24 @@ if __name__ == "__main__":
         with open(args.config, "r") as ymlfile:
            cfg = yaml.load(ymlfile, Loader=yaml.FullLoader)
 
+    layer_key = {
+        0: "background",
+        1: "terrain",
+        2: "foreground"
+    }
+
     layers = [get_layer("BackgroundVisualLayers", cfg.get("background", {}), args), get_layer("TerrainLayers", cfg.get("terrain", {}), args), get_layer("ForegroundVisualLayers", cfg.get("foreground", {}), args)]
-    map_width = max([x.size[0] for x in layers])
-    map_height = max([x.size[1] for x in layers])
+    
+    map_width = max([x.size[0] for x in layers if x is not None])
+    map_height = max([x.size[1] for x in layers if x is not None])
     full_map = Image.new('RGBA', (map_width, map_height))
-    for layer in layers:
-            full_map.paste(layer, (0,0), layer)
+    for layer_id, layer in enumerate(layers):
+        if layer is None:
+            continue
+        pos_x = 0
+        pos_y = 0
+        if cfg.get(layer_key[layer_id], {}).get("vcenter", False):
+            pos_y = (map_height-layer.size[1])//2 + 256
+        full_map.paste(layer, (0,pos_y), layer)
     output_path = f"{args.input.stem}.png" if args.output is None else args.output
     full_map.save(output_path)

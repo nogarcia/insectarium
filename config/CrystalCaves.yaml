@@ -1,0 +1,19 @@
+background:
+  1:
+    hidden: true
+  2:
+    hidden: true
+  3:
+    hidden: true
+  4:
+    hidden: true
+  vcenter: true
+terrain:
+  2:
+    hidden: true
+  3:
+    mirror: true
+    mirror_hoffset: 6
+foreground:
+  0:
+    hidden: true
