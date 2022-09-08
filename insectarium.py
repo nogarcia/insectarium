@@ -1,6 +1,7 @@
 from PIL import Image
+from PIL.Image import Image as ImageType
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import argparse
 import yaml
 
@@ -10,58 +11,67 @@ def get_coords(path: Path) -> List[int]:
     """
     return [int(x) for x in path.stem.split("_")]
 
-def get_layer(layer_path: str, cfg: dict, args) -> Image:
+def get_layer(layer_path: str, cfg: dict, args) -> Optional[ImageType]:
     # Get all images
     tile_paths = list(args.input.joinpath(layer_path).glob('*.png'))
+
+    if len(tile_paths) == 0: # Aw, shucks. Nothing here.
+        return None
+
     # Count the layers by looking through all the files for the biggest x in the pattern x_*_*.png
-    sublayer_count = max([get_coords(x)[0] for x in tile_paths]) + 1
+    sublayer_keys = list(set([get_coords(x)[0] for x in tile_paths])) # get all layers
+    sublayer_keys = [x for x in sublayer_keys if not cfg.get(x, {}).get("hidden", False)] # filter out hidden layers
+    sublayer_keys.sort()
     # initialize a blank sublayer list
-    sublayers = [None]*sublayer_count
+    sublayer_images: List[ImageType] = []
 
     # Filter out all images for hidden layers
-    tile_paths = [x for x in tile_paths if not cfg.get(get_coords(x)[0], {}).get("hidden", False)]
+    tile_paths = [x for x in tile_paths if get_coords(x)[0] in sublayer_keys]
 
-    for i in range(sublayer_count):
+    if len(sublayer_keys) == 0: # If there are no visible layers...
+        return None # ...return nothing.
+
+    for sublayer in sublayer_keys:
         # Only get images for this layer
-        sublayer_images = [x for x in tile_paths if get_coords(x)[0] == i]
-        if len(sublayer_images) == 0: # This is a hidden layer; leave it none
-            continue
+        sublayer_tiles = [x for x in tile_paths if get_coords(x)[0] == sublayer]
+
         # Calculate width
-        sublayer_width = (max([get_coords(x)[2] for x in sublayer_images]) + 1) * 128
-        sublayer_height = (max([get_coords(x)[1] for x in sublayer_images]) + 1) * 128
+        sublayer_width = (max([get_coords(x)[2] for x in sublayer_tiles]) + 1) * 128
+        sublayer_height = (max([get_coords(x)[1] for x in sublayer_tiles]) + 1) * 128
         # Initialize image
-        sublayers[i] = Image.new('RGBA', (sublayer_width, sublayer_height))
+        sublayer_images.append(Image.new('RGBA', (sublayer_width, sublayer_height)))
 
     for tile_path in tile_paths:
         tile_coords = get_coords(tile_path)
         tile = Image.open(tile_path)
-        sublayers[tile_coords[0]].paste(tile, (tile_coords[2] * 128, tile_coords[1] * 128), tile)
 
-    if len([x for x in sublayers if x is not None]) == 0: # If there are no visible layers...
-        return None # ...return nothing.
+        # remap file layer to "data layer" index; we have to do this because hidden layers change the list length
+        sublayer = sublayer_keys.index(tile_coords[0])  
+        sublayer_images[sublayer].paste(tile, (tile_coords[2] * 128, tile_coords[1] * 128), tile)
 
-    for sublayer_id, sublayer in enumerate(sublayers):
-        if cfg.get(sublayer_id, {}).get("mirror", False):
+    for sublayer_id, sublayer in enumerate(sublayer_images):
+        true_layer = sublayer_keys[sublayer_id]
+        if cfg.get(true_layer, {}).get("mirror", False):
             # Mirror
-            mirror_width = (sublayer.size[0] * 2) - 128 * cfg.get(sublayer_id, {}).get("mirror_hoffset", 0)
-            flip_pos = sublayer.size[0] - 128 * cfg.get(sublayer_id, {}).get("mirror_hoffset", 0)
+            mirror_width = (sublayer.size[0] * 2) - 128 * cfg.get(true_layer, {}).get("mirror_hoffset", 0)
+            flip_pos = sublayer.size[0] - 128 * cfg.get(true_layer, {}).get("mirror_hoffset", 0)
             mirror_image = Image.new('RGBA', (mirror_width, sublayer.size[1]))
             flip = sublayer.transpose(Image.FLIP_LEFT_RIGHT)
 
             mirror_image.paste(sublayer, (0,0), sublayer)
             mirror_image.paste(flip, (flip_pos, 0), flip)
-            sublayers[sublayer_id] = mirror_image
+            sublayer_images[sublayer_id] = mirror_image
 
-    layer_width = max([x.size[0] for x in sublayers if x is not None])
-    layer_height = max([x.size[1] for x in sublayers if x is not None])
+    layer_width = max(sublayer_images, key=lambda x: x.size[0]).size[0]
+    layer_height = max(sublayer_images, key=lambda x: x.size[1]).size[1]
 
     layer = Image.new('RGBA', (layer_width, layer_height))
-    for sublayer_id, sublayer in enumerate(sublayers):
+    for sublayer_id, sublayer in enumerate(sublayer_images):
         if sublayer is None:
             continue
         if args.all:
             Path(f"debug/{args.input.stem}/").mkdir(parents=True, exist_ok=True)
-            sublayer.save(Path(f"debug/{args.input.stem}/{args.input.stem}_{layer_path}{sublayer_id}.png"))
+            sublayer.save(Path(f"debug/{args.input.stem}/{args.input.stem}_{layer_path}{sublayer_keys[sublayer_id]}.png"))
         layer.paste(sublayer, (0,0), sublayer)
 
     return layer
